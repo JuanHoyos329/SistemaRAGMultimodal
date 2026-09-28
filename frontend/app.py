@@ -56,6 +56,20 @@ def render_source_image(source, seen_images):
         st.warning(f"No se pudo cargar la imagen de la p\u00e1gina {source['page_number']}: {exc}")
 
 
+def render_sources(sources):
+    if not sources:
+        return
+    with st.expander(f"Fuentes consultadas ({len(sources)})"):
+        seen_images = []
+        for source in sources:
+            st.markdown(f"**{source['filename']} - página {source['page_number']}**")
+            st.caption(source.get("chunk_type", "text").replace("_", " ").capitalize())
+            excerpt = source.get("content", "").strip()
+            if excerpt:
+                st.write(excerpt[:700] + ("…" if len(excerpt) > 700 else ""))
+            render_source_image(source, seen_images)
+
+
 with st.sidebar:
     st.header("Documentos")
     uploaded = st.file_uploader("Subir PDF", type=["pdf"])
@@ -91,10 +105,7 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
         if message.get("warning"):
             st.warning(message["warning"])
-        seen_images = []
-        for source in message.get("sources", []):
-            st.caption(f"Fuente: {source['filename']} \u00b7 P\u00e1gina {source['page_number']}")
-            render_source_image(source, seen_images)
+        render_sources(message.get("sources", []))
 
 if question := st.chat_input("Haga sus preguntas sobre el documento aqui"):
     st.session_state.messages.append({"role": "user", "content": question})
@@ -103,17 +114,24 @@ if question := st.chat_input("Haga sus preguntas sobre el documento aqui"):
     with st.chat_message("assistant"):
         try:
             response = requests.post(
-                f"{API_URL}/rag/query", json={"query": question, "top_k": 5}, timeout=120,
+                f"{API_URL}/rag/query",
+                json={
+                    "query": question,
+                    "top_k": 5,
+                    "history": [
+                        {"role": item["role"], "content": item["content"]}
+                        for item in st.session_state.messages[:-1][-6:]
+                        if item.get("role") in {"user", "assistant"}
+                    ],
+                },
+                timeout=120,
             )
             response.raise_for_status()
             result = response.json()
             st.markdown(result["answer"])
             if result.get("warning"):
                 st.warning(result["warning"])
-            seen_images = []
-            for source in result["sources"]:
-                st.caption(f"Fuente: {source['filename']} \u00b7 P\u00e1gina {source['page_number']}")
-                render_source_image(source, seen_images)
+            render_sources(result["sources"])
             st.session_state.messages.append({
                 "role": "assistant", "content": result["answer"], "sources": result["sources"],
                 "warning": result.get("warning"),

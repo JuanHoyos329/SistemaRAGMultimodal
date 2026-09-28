@@ -88,7 +88,3 @@ La ingesta acepta PDF de hasta 30 MB, extrae PDF con texto seleccionable y requi
 ## Calidad y siguientes pasos
 
 La estructura separa rutas, servicios, entidades e infraestructura. Para extender a producción: añadir pruebas unitarias con mocks para Qdrant/LLM, OCR opcional, captions/visión para diagramas, cola de trabajo durable, autenticación, cuotas por usuario, eliminación/versionado de documentos, observabilidad y evaluación de recuperación (Recall@k/MRR) con un conjunto de preguntas etiquetadas.
-
-## Entregables de demostración
-
-Sube un manual técnico, espera el estado `COMPLETED`, pregunta por un dato textual y por otra sección que haga referencia a una figura con etiquetas. La UI muestra Markdown, archivo, página e imagen asociada. Añade al repositorio un video breve de ese recorrido y commits con mensajes convencionales antes de entregar.

@@ -33,7 +33,8 @@ def search_documents(request: SearchRequest, service: RAGService = Depends(get_r
 @router.post("/query", response_model=QueryResponse)
 def query_rag(request: QueryRequest, service: RAGService = Depends(get_rag_service)):
     try:
-        return service.answer_question(request.query, request.top_k)
+        history = [message.model_dump() for message in request.history]
+        return service.answer_question(request.query, request.top_k, history)
     except Exception as exc:
         logger.exception("RAG query failed")
         raise HTTPException(status_code=503, detail="La consulta no está disponible temporalmente.") from exc

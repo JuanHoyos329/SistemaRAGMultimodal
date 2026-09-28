@@ -87,8 +87,12 @@ class RAGService:
                 break
         return unique_results
 
-    def answer_question(self, question: str, top_k: int = 5) -> dict[str, Any]:
-        sources = self.search(query=question, top_k=top_k)
+    def answer_question(
+        self, question: str, top_k: int = 5, history: list[dict[str, str]] | None = None
+    ) -> dict[str, Any]:
+        history = (history or [])[-6:]
+        retrieval_query = self._contextualize_followup(question, history)
+        sources = self.search(query=retrieval_query, top_k=top_k)
         if not sources:
             return {
                 "answer": "No encontré información suficiente en los PDF para responder. Solo respondo preguntas respaldadas por su contenido.",
@@ -102,15 +106,29 @@ class RAGService:
             + ("\n[Hay una imagen relacionada en esta página.]" if source.get("image_url") else "")
             for source in sources[:4]
         )
-        answer, warning = self._generate(question, context, sources)
+        answer, warning = self._generate(question, context, sources, history)
+        answer = self._ensure_citations(answer, sources)
         return {"answer": answer, "sources": sources, "warning": warning}
 
-    def _generate(self, question: str, context: str, sources: list[dict[str, Any]]) -> tuple[str, str | None]:
+    def _generate(
+        self, question: str, context: str, sources: list[dict[str, Any]], history: list[dict[str, str]]
+    ) -> tuple[str, str | None]:
         if self.answer_generator is None:
-            warning = "No hay una clave OPENAI_API_KEY configurada; se muestran los fragmentos recuperados."
+            warning = "OpenAI no está configurado; se generó una respuesta extractiva a partir de las fuentes."
             return self._extractive_answer(question, sources), warning
         try:
-            return self.answer_generator.generate(question, context), None
+            generation_question = question
+            if history:
+                recent = "\n".join(
+                    f"{item['role']}: {item['content'][:600]}" for item in history
+                    if item.get("role") in {"user", "assistant"} and item.get("content")
+                )
+                if recent:
+                    generation_question = (
+                        f"Historial reciente (úsalo solo para resolver referencias; no es evidencia):\n{recent}\n\n"
+                        f"Pregunta actual: {question}"
+                    )
+            return self.answer_generator.generate(generation_question, context), None
         except Exception as exc:
             logger.exception("LLM generation failed")
             error_type = type(exc).__name__
@@ -129,6 +147,53 @@ class RAGService:
                 warning = f"Falló la generación con OpenAI ({error_type}). Consulta los logs de la API para ver el detalle."
             fallback = self._extractive_answer(question, sources)
             return fallback, warning
+
+    @staticmethod
+    def _ensure_citations(answer: str, sources: list[dict[str, Any]]) -> str:
+        """Keep only citations that map to retrieved sources and add a fallback citation."""
+        citation_pattern = re.compile(
+            r"\[([^\],]+),\s*(?:p[aá]gina|p\.?)\s*(\d+)\]", re.IGNORECASE
+        )
+        valid_sources = {
+            (source["filename"].casefold(), int(source["page_number"]))
+            for source in sources
+        }
+        found_valid = False
+
+        def validate(match: re.Match[str]) -> str:
+            nonlocal found_valid
+            key = (match.group(1).strip().casefold(), int(match.group(2)))
+            if key in valid_sources:
+                found_valid = True
+                return match.group(0)
+            return ""
+
+        cleaned = citation_pattern.sub(validate, answer).strip()
+        if not found_valid and sources:
+            references = "; ".join(
+                f"[{source['filename']}, página {source['page_number']}]"
+                for source in sources[:2]
+            )
+            cleaned = f"{cleaned}\n\nFuentes consultadas: {references}".strip()
+        return re.sub(r"\s+([,.;])", r"\1", cleaned)
+
+    @classmethod
+    def _contextualize_followup(cls, question: str, history: list[dict[str, str]]) -> str:
+        previous_question = next(
+            (item["content"] for item in reversed(history) if item.get("role") == "user"), None
+        )
+        if not previous_question:
+            return question
+        terms = cls._content_tokens(question) - _STOP_WORDS
+        normalized = cls._canonical_content(question)
+        reference_words = {"eso", "esa", "ese", "esto", "estos", "estas", "ello", "ahi", "alli", "anterior"}
+        if (
+            len(terms) <= 1
+            or reference_words.intersection(terms)
+            or re.search(r"^(?:y\b|.*\b(?:su|sus)\b)", normalized)
+        ):
+            return f"{previous_question}. Seguimiento: {question}"
+        return question
 
     def _extractive_answer(self, question: str, sources: list[dict[str, Any]]) -> str:
         if self._is_overview_query(question):
