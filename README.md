@@ -1,90 +1,105 @@
 # Sistema RAG Multimodal
 
-Demo de un asistente de consulta para manuales PDF. La API extrae bloques de texto, tablas e imágenes con PyMuPDF; agrupa texto según bloques y cercanía espacial; genera embeddings de texto multilingües; recupera contexto por similitud y términos exactos; y devuelve citas de archivo/página con la imagen más cercana cuando existe.
+Asistente para consultar manuales técnicos en PDF mediante preguntas en lenguaje natural. Procesa texto, tablas e imágenes; recupera fragmentos relevantes y presenta respuestas con referencias al archivo y la página.
+
+## Demo
+
+El repositorio incluye [`Manual_Bomba_BC-200.pdf`](Manual_Bomba_BC-200.pdf) como documento de ejemplo. Al iniciar el proyecto, súbelo desde la barra lateral de la aplicación y espera a que la ingesta llegue a `COMPLETED`.
+
+Preguntas sugeridas para probarlo:
+
+- `¿De qué trata el manual?`
+- `¿Cuáles son los componentes principales de la bomba?`
+- `¿Qué muestra el esquema de la bomba?`
+- `¿Cómo se prepara sushi?` La respuesta debe indicar que el manual no contiene información suficiente.
 
 ## Arquitectura
 
 ```mermaid
 flowchart LR
-    U[Usuario] --> UI[Streamlit: chat e ingesta]
-    UI --> API[FastAPI: documentos y RAG]
-    API --> JOB[BackgroundTasks]
-    JOB --> PDF[PyMuPDF: texto, tablas, bbox e imágenes]
-    PDF --> CH[Chunker por layout]
-    CH --> EMB[Sentence Transformers: embeddings de texto]
-    EMB --> Q[(Qdrant: vectores y payload)]
-    API --> SQLITE[(SQLite: estado durable de jobs)]
-    API --> RET[Recuperación híbrida: vector + full text]
+    U[Usuario] --> UI[Streamlit]
+    UI --> API[FastAPI]
+    API --> JOB[Ingesta en segundo plano]
+    JOB --> PDF[PyMuPDF: texto, tablas, imágenes y coordenadas]
+    PDF --> CH[Chunking por layout]
+    CH --> EMB[Sentence Transformers]
+    EMB --> Q[(Qdrant)]
+    API --> SQLITE[(SQLite: estado de ingesta)]
+    API --> RET[Recuperación híbrida]
     RET --> Q
-    RET --> LLM[OpenAI opcional: respuesta con contexto y citas]
-    UI -->|Markdown, fuentes e imagen relacionada| U
+    RET --> LLM[OpenAI opcional]
+    UI --> U
 ```
 
-La API coordina los adaptadores de almacenamiento, embeddings y generación. Qdrant persiste el índice; SQLite mantiene el progreso de ingesta entre reinicios. Para un despliegue con varias réplicas, se debe reemplazar `BackgroundTasks` por una cola durable (Celery/RQ) y SQLite por PostgreSQL/Redis, además de compartir almacenamiento de archivos.
+FastAPI separa las rutas HTTP del servicio RAG y de las integraciones mediante interfaces. Qdrant almacena los vectores y sus metadatos; SQLite conserva el estado de los trabajos de ingesta. Docker Compose levanta la API, el frontend y Qdrant.
 
-## Decisiones técnicas
+## Funcionalidades
 
-- **Chunking por layout:** conserva los límites de bloque, ordena por coordenadas, respeta saltos verticales y combina bloques hasta un tamaño objetivo. Tablas extraídas se representan como filas de texto. Cada fragmento conserva página y bounding box.
-- **Contexto visual:** se extraen las imágenes embebidas, se guardan por documento y se asocian al bloque textual espacialmente más cercano. Si `OPENAI_API_KEY` está configurada, se describen hasta 30 imágenes por documento con el modelo de visión (`ENABLE_IMAGE_CAPTIONS=true`), y esas descripciones se indexan en el mismo espacio textual. La UI muestra la imagen junto a su cita. Sin clave, se usan texto cercano y coordenadas; no se calculan embeddings de píxeles.
-- **Recuperación híbrida:** Qdrant ejecuta búsqueda semántica y una consulta filtrada por términos exactos; sus rankings se fusionan con Reciprocal Rank Fusion. Antes de generar, se limpian tablas y se quitan fragmentos casi duplicados.
-- **Control de alcance:** solo pasa contexto a la respuesta si hay coincidencia léxica suficiente o similitud semántica alta con términos compartidos. Ajusta `MIN_SEMANTIC_SCORE` en `.env` si el filtro queda demasiado estricto o permisivo.
-- **Resumen del documento:** preguntas generales como “¿de qué trata el PDF?” usan una búsqueda de temas y objetivo del documento, en vez del filtro de coincidencia de una pregunta específica. No adjuntan imágenes al resumen.
-- **Embeddings:** Sentence Transformers multilingüe local evita enviar documentos al proveedor de generación. El modelo se descarga al primer arranque y usa un espacio vectorial de 384 dimensiones.
-- **Generación:** OpenAI es opcional. Sin `OPENAI_API_KEY`, se devuelven los fragmentos y fuentes; si el proveedor falla se conserva el contexto recuperado. La llamada tiene timeout y reintentos con backoff.
-- **Privacidad/costo visual:** al habilitar captions, las imágenes y un extracto del texto cercano se envían al proveedor de visión durante la ingesta. Se limita el número por PDF; desactiva `ENABLE_IMAGE_CAPTIONS` para no enviarlas.
-- **Respuestas de respaldo:** si el LLM falla, se extrae una frase pertinente del mejor fragmento en lugar de volcar todo el contexto; la interfaz presenta aparte una advertencia con la causa probable.
-- **Ingesta:** `BackgroundTasks` y SQLite hacen la demo sencilla y durable para una instancia. No es un broker distribuido ni garantiza reintento automático tras caída del proceso.
+- **Ingesta asíncrona:** la API devuelve un `job_id` y permite consultar el progreso y resultado del procesamiento.
+- **Extracción multimodal:** PyMuPDF extrae texto, tablas, imágenes y coordenadas espaciales de cada página.
+- **Chunking por layout:** agrupa bloques cercanos y conserva límites, página y bounding box. Las tablas se representan como texto.
+- **Contexto visual:** asocia una imagen con el fragmento espacialmente más cercano y la muestra en las fuentes. Con `OPENAI_API_KEY` y `ENABLE_IMAGE_CAPTIONS=true`, describe e indexa captions de imágenes durante la ingesta.
+- **Recuperación híbrida:** combina similitud semántica y coincidencias de términos con Reciprocal Rank Fusion; elimina resultados casi duplicados.
+- **Respuestas fundamentadas:** el generador usa el contexto recuperado, incorpora citas de archivo y página, y se abstiene si no encuentra respaldo suficiente. El historial reciente ayuda a resolver preguntas de seguimiento.
+- **Respaldo ante fallos:** si OpenAI no está configurado o no responde, el sistema presenta una respuesta extractiva y conserva las fuentes recuperadas.
 
-## Requisitos y ejecución
+## Decisiones y límites conocidos
 
-### Docker Compose (recomendado)
+- Sentence Transformers genera embeddings de texto localmente. No se crean embeddings de píxeles; las imágenes se relacionan con el texto mediante proximidad espacial y, opcionalmente, captions generadas por visión.
+- OpenAI es opcional para generar respuestas. Si se habilitan captions, las imágenes y parte del texto cercano se envían al proveedor durante la ingesta; desactiva `ENABLE_IMAGE_CAPTIONS` para evitarlo.
+- `BackgroundTasks` y SQLite son adecuados para una demo en una sola instancia, pero no forman una cola distribuida. Para múltiples réplicas o un volumen alto de documentos, conviene migrar a una cola durable, almacenamiento compartido y una base de datos de trabajos como PostgreSQL/Redis.
+- Los PDF escaneados requieren OCR, que no está incluido.
 
-1. Copia `.env.example` como `.env` y añade una clave de OpenAI si quieres generación de respuestas. Sin clave, la búsqueda y las fuentes siguen disponibles.
-2. Ejecuta `docker compose up --build`.
-3. Abre la UI en <http://localhost:8501> y la documentación de API en <http://localhost:8000/docs>.
+## Requisitos
 
-La primera construcción descarga dependencias y el primer inicio descarga el modelo de embeddings. Qdrant escucha en `localhost:6333`. Esta versión usa una colección Qdrant nueva (`multimodal_rag_v2`) para no mezclar los chunks viejos; vuelve a subir los PDF que quieras consultar.
+- Docker Desktop instalado y en ejecución, con Docker Compose.
+- Una clave de OpenAI es opcional. Sin ella funcionan la ingesta, la recuperación y las respuestas extractivas; las captions de imágenes no se generan.
 
-### Ejecución local
+No necesitas instalar Python en tu equipo, crear un entorno virtual ni ejecutar `pip install` para iniciar la aplicación. Docker instala las dependencias dentro de los contenedores.
 
-Requiere Python 3.11+ y un servidor Qdrant disponible.
+## Inicio con Docker
+
+Desde la raíz del repositorio, en PowerShell:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
 Copy-Item .env.example .env
-$env:QDRANT_HOST = "localhost"
-uvicorn app.main:app --app-dir backend --reload
 ```
 
-En otra terminal:
+Si quieres usar OpenAI, agrega tu clave a `OPENAI_API_KEY` en `.env`. Conserva ese archivo local y no lo publiques en GitHub.
+
+Construye e inicia los servicios:
 
 ```powershell
-pip install -r frontend/requirements.txt
-$env:API_URL = "http://localhost:8000"
-streamlit run frontend/app.py
+docker compose up --build -d
+docker compose ps
 ```
 
-### Pruebas unitarias
+Abre la aplicación y los servicios:
+
+- Frontend: <http://localhost:8501>
+- Documentación interactiva de la API: <http://localhost:8000/docs>
+- Salud de la API: <http://localhost:8000/health>
+
+La primera construcción descarga dependencias y el primer arranque descarga el modelo multilingüe de embeddings. Sube `Manual_Bomba_BC-200.pdf` desde la barra lateral; el PDF no se indexa automáticamente.
+
+Para revisar los logs:
 
 ```powershell
-pip install -r requirements-dev.txt
-pytest -q
+docker compose logs -f api
 ```
 
-Las pruebas aíslan el motor RAG con dobles de embeddings, vector store y LLM; el chunker se prueba sin servicios externos.
+Para detener los servicios sin borrar los documentos ni el índice persistidos:
 
-## Uso de la API
+```powershell
+docker compose down
+```
 
-- `POST /documents/upload` con `multipart/form-data` (`file`): devuelve `job_id` (202).
-- `GET /documents/jobs/{job_id}`: estado, progreso, resumen o error.
-- `POST /rag/search` con `{"query":"...", "top_k":5}`: fragmentos y referencias visuales.
-- `POST /rag/query` con el mismo cuerpo: respuesta y fuentes citables.
-- `GET /health`: salud de la API.
+## API
 
-La ingesta acepta PDF de hasta 30 MB, extrae PDF con texto seleccionable y requiere al menos un bloque textual. Normaliza entidades HTML y acentos agudos separados que aparecen en algunas extracciones PDF. Los documentos escaneados necesitan OCR (por ejemplo, Tesseract), que todavía no está incluido. Las imágenes guardadas se sirven desde `/media/` para la demo.
+- `POST /documents/upload`: carga un PDF y devuelve un `job_id`.
+- `GET /documents/jobs/{job_id}`: consulta estado, progreso, resultado o error de la ingesta.
+- `POST /rag/search`: busca fragmentos y referencias asociadas.
+- `POST /rag/query`: genera una respuesta basada en las fuentes recuperadas.
+- `GET /health`: comprueba el estado de la API.
 
-## Calidad y siguientes pasos
-
-La estructura separa rutas, servicios, entidades e infraestructura. Para extender a producción: añadir pruebas unitarias con mocks para Qdrant/LLM, OCR opcional, captions/visión para diagramas, cola de trabajo durable, autenticación, cuotas por usuario, eliminación/versionado de documentos, observabilidad y evaluación de recuperación (Recall@k/MRR) con un conjunto de preguntas etiquetadas.
+La carga acepta archivos PDF de hasta 30 MB y requiere texto seleccionable. Las imágenes extraídas se sirven desde `/media/`.
