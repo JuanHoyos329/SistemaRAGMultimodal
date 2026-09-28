@@ -1,0 +1,29 @@
+from pydantic import BaseModel, Field
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=2, max_length=2000)
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class SearchHit(BaseModel):
+    id: str
+    score: float
+    document_id: str
+    filename: str
+    page_number: int
+    content: str
+    chunk_type: str = "text"
+    bbox: list[float] | None = None
+    associated_image_path: str | None = None
+    image_url: str | None = None
+
+
+class QueryRequest(SearchRequest):
+    pass
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    sources: list[SearchHit]
+    warning: str | None = None

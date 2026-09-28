@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+backend/storage/uploads/
+backend/storage/images/
+backend/storage/jobs.sqlite3
+backend/qdrant_db/
+*.log
+.DS_Store
